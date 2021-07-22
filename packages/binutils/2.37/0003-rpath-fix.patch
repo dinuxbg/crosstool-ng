@@ -1,0 +1,35 @@
+From c5fd76bc56ce15851b66c54a0e163186c0cbb8ea Mon Sep 17 00:00:00 2001
+From: Dimitar Dimitrov <dimitar@dinux.eu>
+Date: Thu, 22 Jul 2021 21:51:22 +0300
+Subject: [PATCH 03/10] rpath fix
+
+Signed-off-by: Dimitar Dimitrov <dimitar@dinux.eu>
+---
+ ld/ldelf.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/ld/ldelf.c b/ld/ldelf.c
+index 21e655bb55c..8e7b5241227 100644
+--- a/ld/ldelf.c
++++ b/ld/ldelf.c
+@@ -1250,6 +1250,8 @@ ldelf_after_open (int use_libpath, int native, int is_linux, int is_freebsd,
+ 		  && command_line.rpath == NULL)
+ 		{
+ 		  path = (const char *) getenv ("LD_RUN_PATH");
++		  if (path && *path == '\0')
++		    path = NULL;
+ 		  if (path
+ 		      && ldelf_search_needed (path, &n, force,
+ 					      is_linux, elfsize))
+@@ -1610,6 +1612,8 @@ ldelf_before_allocation (char *audit, char *depaudit,
+   rpath = command_line.rpath;
+   if (rpath == NULL)
+     rpath = (const char *) getenv ("LD_RUN_PATH");
++  if (rpath && *rpath == '\0')
++    rpath = NULL;
+ 
+   for (abfd = link_info.input_bfds; abfd; abfd = abfd->link.next)
+     if (bfd_get_flavour (abfd) == bfd_target_elf_flavour)
+-- 
+2.31.1
+

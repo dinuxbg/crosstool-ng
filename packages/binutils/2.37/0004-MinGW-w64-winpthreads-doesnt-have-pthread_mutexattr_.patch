@@ -1,0 +1,27 @@
+From 9928875d9d4a332f5af08c85c377c94b7e396898 Mon Sep 17 00:00:00 2001
+From: Dimitar Dimitrov <dimitar@dinux.eu>
+Date: Thu, 22 Jul 2021 21:51:39 +0300
+Subject: [PATCH 04/10] MinGW w64 winpthreads doesnt have
+ pthread_mutexattr_settype
+
+Signed-off-by: Dimitar Dimitrov <dimitar@dinux.eu>
+---
+ gold/gold-threads.cc | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/gold/gold-threads.cc b/gold/gold-threads.cc
+index 647381fb4b4..d384f554048 100644
+--- a/gold/gold-threads.cc
++++ b/gold/gold-threads.cc
+@@ -101,7 +101,7 @@ Lock_impl_threads::Lock_impl_threads()
+   int err = pthread_mutexattr_init(&attr);
+   if (err != 0)
+     gold_fatal(_("pthead_mutexattr_init failed: %s"), strerror(err));
+-#ifdef PTHREAD_MUTEX_ADAPTIVE_NP
++#if defined(PTHREAD_MUTEX_ADAPTIVE_NP) && !defined(_WIN32)
+   err = pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_ADAPTIVE_NP);
+   if (err != 0)
+     gold_fatal(_("pthread_mutexattr_settype failed: %s"), strerror(err));
+-- 
+2.31.1
+

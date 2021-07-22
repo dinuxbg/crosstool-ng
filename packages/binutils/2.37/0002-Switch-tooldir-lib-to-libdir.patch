@@ -1,0 +1,40 @@
+From 01640a6d58e027ba58ae5e0b2e6b87ce9150a961 Mon Sep 17 00:00:00 2001
+From: Dimitar Dimitrov <dimitar@dinux.eu>
+Date: Thu, 22 Jul 2021 21:50:36 +0300
+Subject: [PATCH 02/10] Switch ${tooldir}/lib to ${libdir}
+
+Signed-off-by: Dimitar Dimitrov <dimitar@dinux.eu>
+---
+ ld/Makefile.am | 2 +-
+ ld/Makefile.in | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/ld/Makefile.am b/ld/Makefile.am
+index f8e99325361..7332049445e 100644
+--- a/ld/Makefile.am
++++ b/ld/Makefile.am
+@@ -50,7 +50,7 @@ AM_CFLAGS = $(WARN_CFLAGS) $(ELF_CLFAGS)
+ # We put the scripts in the directory $(scriptdir)/ldscripts.
+ # We can't put the scripts in $(datadir) because the SEARCH_DIR
+ # directives need to be different for native and cross linkers.
+-scriptdir = $(tooldir)/lib
++scriptdir = $(libdir)
+ 
+ EMUL = @EMUL@
+ EMULATION_OFILES = @EMULATION_OFILES@
+diff --git a/ld/Makefile.in b/ld/Makefile.in
+index ef2e99e08da..7d9ad2b3579 100644
+--- a/ld/Makefile.in
++++ b/ld/Makefile.in
+@@ -562,7 +562,7 @@ AM_CFLAGS = $(WARN_CFLAGS) $(ELF_CLFAGS)
+ # We put the scripts in the directory $(scriptdir)/ldscripts.
+ # We can't put the scripts in $(datadir) because the SEARCH_DIR
+ # directives need to be different for native and cross linkers.
+-scriptdir = $(tooldir)/lib
++scriptdir = $(libdir)
+ BASEDIR = $(srcdir)/..
+ BFDDIR = $(BASEDIR)/bfd
+ INCDIR = $(BASEDIR)/include
+-- 
+2.31.1
+
