@@ -1,0 +1,626 @@
+From 10dd6dea95c5fc41c789c6506338e101e0590a02 Mon Sep 17 00:00:00 2001
+From: Dimitar Dimitrov <dimitar@dinux.eu>
+Date: Sun, 14 Aug 2022 18:50:18 +0300
+Subject: [PATCH] PR target/106564: pru: Optimize 64-bit sign- and zero-extend
+
+Add new patterns to optimize 64-bit sign- and zero-extend operations for
+the PRU target.
+
+The new 64-bit zero-extend patterns are straightforward define_insns.
+
+The old 16/32-bit sign-extend pattern has been rewritten from scratch
+in order to add 64-bit support.  The new pattern expands into several
+optimized insns for filling bytes with zeros or ones, and for
+conditional branching on bit-test.  The bulk of this patch is to
+implement the patterns for those new optimized insns.
+
+	PR target/106564
+
+gcc/ChangeLog:
+
+	* config/pru/constraints.md (Um): New constraint for -1.
+	(Uf): New constraint for IOR fill-bytes constants.
+	(Uz): New constraint for AND zero-bytes constants.
+	* config/pru/predicates.md (const_fillbytes_operand): New
+	predicate for IOR fill-bytes constants.
+	(const_zerobytes_operand): New predicate for AND zero-bytes
+	constants.
+	* config/pru/pru-protos.h (pru_output_sign_extend): Remove.
+	(struct pru_byterange): New struct to describe a byte range.
+	(pru_calc_byterange): New declaration.
+	* config/pru/pru.cc (pru_rtx_costs): Add penalty for
+	64-bit zero-extend.
+	(pru_output_sign_extend): Remove.
+	(pru_calc_byterange): New helper function to extract byte
+	range info from a constant.
+	(pru_print_operand): Remove 'y' and 'z' print modifiers.
+	* config/pru/pru.md (zero_extendqidi2): New pattern.
+	(zero_extendhidi2): New pattern.
+	(zero_extendsidi2): New pattern.
+	(extend<EQS0:mode><EQD:mode>2): Rewrite as an expand.
+	(@pru_ior_fillbytes<mode>): New pattern.
+	(@pru_and_zerobytes<mode>): New pattern.
+	(<code>di3): Rewrite as an expand and handle ZERO and FILL
+	special cases.
+	(pru_<code>di3): New name for <code>di3.
+	(@cbranch_qbbx_const_<BIT_TEST:code><HIDI:mode>): New pattern to
+	handle bit-test for 64-bit registers.
+
+gcc/testsuite/ChangeLog:
+
+	* gcc.target/pru/pr106564-1.c: New test.
+	* gcc.target/pru/pr106564-2.c: New test.
+	* gcc.target/pru/pr106564-3.c: New test.
+	* gcc.target/pru/pr106564-4.c: New test.
+
+Signed-off-by: Dimitar Dimitrov <dimitar@dinux.eu>
+---
+ gcc/config/pru/constraints.md             |  23 +++
+ gcc/config/pru/predicates.md              |  22 +++
+ gcc/config/pru/pru-protos.h               |   9 +-
+ gcc/config/pru/pru.cc                     | 100 +++++------
+ gcc/config/pru/pru.md                     | 210 ++++++++++++++++++++--
+ gcc/testsuite/gcc.target/pru/pr106564-1.c |   9 +
+ gcc/testsuite/gcc.target/pru/pr106564-2.c |   9 +
+ gcc/testsuite/gcc.target/pru/pr106564-3.c |   9 +
+ gcc/testsuite/gcc.target/pru/pr106564-4.c |   9 +
+ 9 files changed, 338 insertions(+), 62 deletions(-)
+ create mode 100644 gcc/testsuite/gcc.target/pru/pr106564-1.c
+ create mode 100644 gcc/testsuite/gcc.target/pru/pr106564-2.c
+ create mode 100644 gcc/testsuite/gcc.target/pru/pr106564-3.c
+ create mode 100644 gcc/testsuite/gcc.target/pru/pr106564-4.c
+
+diff --git a/gcc/config/pru/constraints.md b/gcc/config/pru/constraints.md
+index 26f9adbe9a6..99cf39904b4 100644
+--- a/gcc/config/pru/constraints.md
++++ b/gcc/config/pru/constraints.md
+@@ -39,6 +39,11 @@
+ ;;  N: -32768 to 32767 (16-bit signed integer).
+ ;;  O: -128 to 127 (8-bit signed integer).
+ ;;  P: 1
++;;  Um: -1 constant.
++;;  Uf: A constant with a single consecutive range of 0xff bytes.  Rest
++;;      of bytes are zeros.
++;;  Uz: A constant with a single consecutive range of 0x00 bytes.  Rest
++;;      of bytes are 0xff.
+ 
+ ;; Register constraints.
+ 
+@@ -111,3 +116,21 @@ (define_constraint "Z"
+   "An integer constant zero."
+   (and (match_code "const_int")
+        (match_test "ival == 0")))
++
++(define_constraint "Um"
++  "@internal
++  A constant -1."
++  (and (match_code "const_int")
++       (match_test "ival == -1")))
++
++(define_constraint "Uf"
++  "@internal
++  An integer constant with a consecutive range of 0xff bytes."
++  (and (match_code "const_int")
++       (match_test "const_fillbytes_operand (op, DImode)")))
++
++(define_constraint "Uz"
++  "@internal
++  An integer constant with a consecutive range of 0x00 bytes."
++  (and (match_code "const_int")
++       (match_test "const_zerobytes_operand (op, DImode)")))
+diff --git a/gcc/config/pru/predicates.md b/gcc/config/pru/predicates.md
+index b8debeea371..a138f70a360 100644
+--- a/gcc/config/pru/predicates.md
++++ b/gcc/config/pru/predicates.md
+@@ -304,3 +304,25 @@ (define_special_predicate "store_multiple_operation"
+     }
+   return true;
+ })
++
++;; Return true if OP is a constant integer with one single consecutive
++;; range of bytes with value 0xff, and the rest of the bytes are 0x00.
++(define_predicate "const_fillbytes_operand"
++  (match_code "const_int")
++{
++  gcc_assert (mode != VOIDmode);
++
++  pru_byterange r = pru_calc_byterange (INTVAL (op), mode);
++  return r.start >=0 && r.nbytes > 0;
++})
++
++;; Return true if OP is a constant integer with one single consecutive
++;; range of bytes with value 0x00, and the rest of the bytes are 0xff.
++(define_predicate "const_zerobytes_operand"
++  (match_code "const_int")
++{
++  gcc_assert (mode != VOIDmode);
++
++  pru_byterange r = pru_calc_byterange (~INTVAL (op), mode);
++  return r.start >=0 && r.nbytes > 0;
++})
+diff --git a/gcc/config/pru/pru-protos.h b/gcc/config/pru/pru-protos.h
+index 2df067afaf7..4b190c98206 100644
+--- a/gcc/config/pru/pru-protos.h
++++ b/gcc/config/pru/pru-protos.h
+@@ -40,7 +40,14 @@ void pru_register_pragmas (void);
+ extern rtx pru_get_return_address (int);
+ extern int pru_hard_regno_rename_ok (unsigned int, unsigned int);
+ 
+-extern const char *pru_output_sign_extend (rtx *);
++struct pru_byterange {
++    int start;		/* Starting byte number.  */
++    int nbytes;		/* Number of consecutive bytes.  */
++};
++
++extern pru_byterange pru_calc_byterange (HOST_WIDE_INT cval,
++					      machine_mode mode);
++
+ extern const char *pru_output_signed_cbranch (rtx *, bool);
+ extern const char *pru_output_signed_cbranch_ubyteop2 (rtx *, bool);
+ extern const char *pru_output_signed_cbranch_zeroop2 (rtx *, bool);
+diff --git a/gcc/config/pru/pru.cc b/gcc/config/pru/pru.cc
+index db093406c71..04eca90b255 100644
+--- a/gcc/config/pru/pru.cc
++++ b/gcc/config/pru/pru.cc
+@@ -766,7 +766,11 @@ pru_rtx_costs (rtx x, machine_mode mode,
+       }
+     case ZERO_EXTEND:
+       {
+-	*total = COSTS_N_INSNS (0);
++	/* 64-bit zero extensions actually have a cost because they
++	   require setting a register to zero.
++	   32-bit and smaller are free.  */
++	int factor = (GET_MODE_SIZE (mode) <= GET_MODE_SIZE (SImode)) ? 0 : 1;
++	*total = factor * COSTS_N_INSNS (1);
+ 	return false;
+       }
+ 
+@@ -970,39 +974,55 @@ sign_bit_position (const rtx op)
+   return sz * 8 - 1;
+ }
+ 
+-/* Output asm code for sign_extend operation.  */
+-const char *
+-pru_output_sign_extend (rtx *operands)
+-{
+-  static char buf[512];
+-  int bufi;
+-  const int dst_sz = GET_MODE_SIZE (GET_MODE (operands[0]));
+-  const int src_sz = GET_MODE_SIZE (GET_MODE (operands[1]));
+-  char ext_start;
++/* Parse the given CVAL integer value, and extract the "filling" byte
++   range of consecutive 0xff byte values.  Rest of bytes must be 0x00.
++   There must be only one range in the given value.  This range would
++   typically be used to calculate the parameters of
++   PRU instructions ZERO and FILL.
+ 
+-  switch (src_sz)
+-    {
+-    case 1: ext_start = 'y'; break;
+-    case 2: ext_start = 'z'; break;
+-    default: gcc_unreachable ();
+-    }
++   The parameter MODE determines the maximum byte range to consider
++   in the given input constant.
+ 
+-  gcc_assert (dst_sz > src_sz);
++   Example input:
++     cval = 0xffffffffffffff00 = -256
++     mode = SImode
++   Return value:
++     start = 1
++     nbytes = 3
+ 
+-  /* Note that src and dst can be different parts of the same
+-     register, e.g. "r7, r7.w1".  */
+-  bufi = snprintf (buf, sizeof (buf),
+-	  "mov\t%%0, %%1\n\t"		      /* Copy AND make positive.  */
+-	  "qbbc\t.+8, %%0, %d\n\t"	      /* Check sign bit.  */
+-	  "fill\t%%%c0, %d",		      /* Make negative.  */
+-	  sign_bit_position (operands[1]),
+-	  ext_start,
+-	  dst_sz - src_sz);
++   On error, return a range with -1 for START and NBYTES.  */
++pru_byterange
++pru_calc_byterange (HOST_WIDE_INT cval, machine_mode mode)
++{
++  const pru_byterange invalid_range = { -1, -1 };
++  pru_byterange r = invalid_range;
++  enum { ST_FFS, ST_INRANGE, ST_TRAILING_ZEROS } st = ST_FFS;
++  int i;
+ 
+-  gcc_assert (bufi > 0);
+-  gcc_assert ((unsigned int) bufi < sizeof (buf));
++  for (i = 0; i < GET_MODE_SIZE (mode); i++)
++    {
++      const int b = cval & ((1U << BITS_PER_UNIT) - 1);
++      cval >>= BITS_PER_UNIT;
++
++      if (b == 0x00 && (st == ST_FFS || st == ST_TRAILING_ZEROS))
++	/* No action.  */;
++      else if (b == 0x00 && st == ST_INRANGE)
++	st = ST_TRAILING_ZEROS;
++      else if (b == 0xff && st == ST_FFS)
++	{
++	  st = ST_INRANGE;
++	  r.start = i;
++	  r.nbytes = 1;
++	}
++      else if (b == 0xff && st == ST_INRANGE)
++	r.nbytes++;
++      else
++	return invalid_range;
++    }
+ 
+-  return buf;
++  if (st != ST_TRAILING_ZEROS && st != ST_INRANGE)
++    return invalid_range;
++  return r;
+ }
+ 
+ /* Branches and compares.  */
+@@ -1619,8 +1639,6 @@ pru_asm_regname (rtx op)
+      V: print exact_log2 () of negated const_int operands.
+      w: Lower 32-bits of a const_int operand.
+      W: Upper 32-bits of a const_int operand.
+-     y: print the next 8-bit register (regardless of op size).
+-     z: print the second next 8-bit register (regardless of op size).
+ */
+ static void
+ pru_print_operand (FILE *file, rtx op, int letter)
+@@ -1693,26 +1711,6 @@ pru_print_operand (FILE *file, rtx op, int letter)
+ 	  fprintf (file, "r%d", REGNO (op) / 4 + (letter == 'N' ? 1 : 0));
+ 	  return;
+ 	}
+-      else if (letter == 'y')
+-	{
+-	  if (REGNO (op) > LAST_NONIO_GP_REGNUM - 1)
+-	    {
+-	      output_operand_lossage ("invalid operand for '%%%c'", letter);
+-	      return;
+-	    }
+-	  fprintf (file, "%s", reg_names[REGNO (op) + 1]);
+-	  return;
+-	}
+-      else if (letter == 'z')
+-	{
+-	  if (REGNO (op) > LAST_NONIO_GP_REGNUM - 2)
+-	    {
+-	      output_operand_lossage ("invalid operand for '%%%c'", letter);
+-	      return;
+-	    }
+-	  fprintf (file, "%s", reg_names[REGNO (op) + 2]);
+-	  return;
+-	}
+       break;
+ 
+     case CONST_INT:
+diff --git a/gcc/config/pru/pru.md b/gcc/config/pru/pru.md
+index 68dcab234b0..031109236d6 100644
+--- a/gcc/config/pru/pru.md
++++ b/gcc/config/pru/pru.md
+@@ -112,12 +112,14 @@ (define_mode_iterator MOV32 [SI SQ USQ SA USA SF SD])
+ (define_mode_iterator MOV64 [DI DF DD DQ UDQ])
+ (define_mode_iterator QISI [QI HI SI])
+ (define_mode_iterator HISI [HI SI])
++(define_mode_iterator HIDI [HI SI DI])
+ (define_mode_iterator SFDF [SF DF])
+ 
+ ;; EQS0/1 for extension source 0/1 and EQD for extension destination patterns.
+ (define_mode_iterator EQS0 [QI HI SI])
+ (define_mode_iterator EQS1 [QI HI SI])
+ (define_mode_iterator EQD [QI HI SI])
++(define_mode_iterator EQDHIDI [HI SI DI])
+ 
+ ;; GCC sign-extends its integer constants.  Hence 0x80 will be represented
+ ;; as -128 for QI mode and 128 for HI and SI modes.  To cope with this,
+@@ -415,18 +417,68 @@ (define_insn "*zero_extend<EQS0:mode><EQD:mode>2"
+   "mov\\t%0, %1"
+   [(set_attr "type"     "alu")])
+ 
+-;; Sign extension patterns.  We have to emulate them due to lack of
++(define_insn "zero_extendqidi2"
++  [(set (match_operand:DI 0 "register_operand" "=r,r")
++	(zero_extend:DI (match_operand:QI 1 "register_operand" "0,r")))]
++  ""
++  "@
++    zero\\t%F0.b1, 7
++    mov\\t%F0.b0, %1\;zero\\t%F0.b1, 7"
++  [(set_attr "type" "alu,alu")
++   (set_attr "length" "4,8")])
++
++(define_insn "zero_extendhidi2"
++  [(set (match_operand:DI 0 "register_operand" "=r,r")
++	(zero_extend:DI (match_operand:HI 1 "register_operand" "0,r")))]
++  ""
++  "@
++    zero\\t%F0.b2, 6
++    mov\\t%F0.w0, %1\;zero\\t%F0.b2, 6"
++  [(set_attr "type" "alu,alu")
++   (set_attr "length" "4,8")])
++
++(define_insn "zero_extendsidi2"
++  [(set (match_operand:DI 0 "register_operand" "=r,r")
++	(zero_extend:DI (match_operand:SI 1 "register_operand" "0,r")))]
++  ""
++  "@
++    zero\\t%N0, 4
++    mov\\t%F0, %1\;zero\\t%N0, 4"
++  [(set_attr "type" "alu,alu")
++   (set_attr "length" "4,8")])
++
++;; Sign extension pattern.  We have to emulate it due to lack of
+ ;; signed operations in PRU's ALU.
+ 
+-(define_insn "extend<EQS0:mode><EQD:mode>2"
+-  [(set (match_operand:EQD 0 "register_operand"			  "=r")
+-	(sign_extend:EQD (match_operand:EQS0 1 "register_operand"  "r")))]
++(define_expand "extend<EQS0:mode><EQDHIDI:mode>2"
++  [(set (match_operand:EQDHIDI 0 "register_operand" "=r")
++	(sign_extend:EQDHIDI (match_operand:EQS0 1 "register_operand" "r")))]
+   ""
+ {
+-  return pru_output_sign_extend (operands);
+-}
+-  [(set_attr "type" "complex")
+-   (set_attr "length" "12")])
++  rtx_code_label *skip_hiset_label;
++
++  /* Clear the higher bits to temporarily make the value positive.  */
++  emit_insn (gen_rtx_SET (operands[0],
++			  gen_rtx_ZERO_EXTEND (<EQDHIDI:MODE>mode,
++					       operands[1])));
++
++  /* Now check if the result must be made negative.  */
++  skip_hiset_label = gen_label_rtx ();
++  const int op1_size = GET_MODE_SIZE (<EQS0:MODE>mode);
++  const int op1_sign_bit = op1_size * BITS_PER_UNIT - 1;
++  emit_jump_insn (gen_cbranch_qbbx_const (EQ,
++					  <EQDHIDI:MODE>mode,
++					  operands[0],
++					  GEN_INT (op1_sign_bit),
++					  skip_hiset_label));
++  emit_insn (gen_ior<EQDHIDI:mode>3 (
++			 operands[0],
++			 operands[0],
++			 GEN_INT (~GET_MODE_MASK (<EQS0:MODE>mode))));
++  emit_label (skip_hiset_label);
++
++  DONE;
++})
+ 
+ ;; Bit extraction
+ ;; We define it solely to allow combine to choose SImode
+@@ -518,6 +570,51 @@ (define_expand "<code><mode>3"
+   ""
+   "")
+ 
++;; Specialised IOR pattern, which can emit an efficient FILL instruction.
++(define_insn "@pru_ior_fillbytes<mode>"
++  [(set (match_operand:HIDI 0 "register_operand" "=r")
++	(ior:HIDI
++	   (match_operand:HIDI 1 "register_operand" "0")
++	   (match_operand:HIDI 2 "const_fillbytes_operand" "Uf")))]
++  ""
++{
++  static char line[64];
++  pru_byterange r;
++
++  r = pru_calc_byterange (INTVAL (operands[2]), <MODE>mode);
++  gcc_assert (r.start >=0 && r.nbytes > 0);
++  gcc_assert ((r.start + r.nbytes) <= GET_MODE_SIZE (<MODE>mode));
++
++  const int regno = REGNO (operands[0]) + r.start;
++
++  sprintf (line, "fill\\tr%d.b%d, %d", regno / 4, regno % 4, r.nbytes);
++  return line;
++}
++  [(set_attr "type" "alu")
++   (set_attr "length" "4")])
++
++;; Specialised AND pattern, which can emit an efficient ZERO instruction.
++(define_insn "@pru_and_zerobytes<mode>"
++  [(set (match_operand:HIDI 0 "register_operand" "=r")
++	(and:HIDI
++	   (match_operand:HIDI 1 "register_operand" "0")
++	   (match_operand:HIDI 2 "const_zerobytes_operand" "Uz")))]
++  ""
++{
++  static char line[64];
++  pru_byterange r;
++
++  r = pru_calc_byterange (~INTVAL (operands[2]), <MODE>mode);
++  gcc_assert (r.start >=0 && r.nbytes > 0);
++  gcc_assert ((r.start + r.nbytes) <= GET_MODE_SIZE (<MODE>mode));
++
++  const int regno = REGNO (operands[0]) + r.start;
++
++  sprintf (line, "zero\\tr%d.b%d, %d", regno / 4, regno % 4, r.nbytes);
++  return line;
++}
++  [(set_attr "type" "alu")
++   (set_attr "length" "4")])
+ 
+ ;;  Shift instructions
+ 
+@@ -641,7 +738,52 @@ (define_insn "*regio_zext_write_r30<EQS0:mode>"
+ ;; DI logical ops could be automatically split into WORD-mode ops in
+ ;; expand_binop().  But then we'll miss an opportunity to use SI mode
+ ;; operations, since WORD mode for PRU is QI.
+-(define_insn "<code>di3"
++(define_expand "<code>di3"
++  [(set (match_operand:DI 0 "register_operand")
++	  (LOGICAL_BITOP:DI
++	    (match_operand:DI 1 "register_operand")
++	    (match_operand:DI 2 "reg_or_const_int_operand")))]
++  ""
++{
++  /* Try with the more efficient zero/fill patterns first.  */
++  if (<LOGICAL_BITOP:CODE> == IOR
++      && CONST_INT_P (operands[2])
++      && const_fillbytes_operand (operands[2], DImode))
++    {
++      rtx insn = maybe_gen_pru_ior_fillbytes (DImode,
++					      operands[0],
++					      operands[0],
++					      operands[2]);
++      if (insn != nullptr)
++	{
++	  if (REGNO (operands[0]) != REGNO (operands[1]))
++	    emit_move_insn (operands[0], operands[1]);
++	  emit_insn (insn);
++	  DONE;
++	}
++    }
++  if (<LOGICAL_BITOP:CODE> == AND
++      && CONST_INT_P (operands[2])
++      && const_zerobytes_operand (operands[2], DImode))
++    {
++      rtx insn = maybe_gen_pru_and_zerobytes (DImode,
++					      operands[0],
++					      operands[0],
++					      operands[2]);
++      if (insn != nullptr)
++	{
++	  if (REGNO (operands[0]) != REGNO (operands[1]))
++	    emit_move_insn (operands[0], operands[1]);
++	  emit_insn (insn);
++	  DONE;
++	}
++    }
++  /* No optimized case found.  Rely on the two-instruction pattern below.  */
++  if (!reg_or_ubyte_operand (operands[2], DImode))
++    operands[2] = force_reg (DImode, operands[2]);
++})
++
++(define_insn "pru_<code>di3"
+   [(set (match_operand:DI 0 "register_operand"		"=&r,&r")
+ 	  (LOGICAL_BITOP:DI
+ 	    (match_operand:DI 1 "register_operand"	"%r,r")
+@@ -653,7 +795,6 @@ (define_insn "<code>di3"
+   [(set_attr "type" "alu")
+    (set_attr "length" "8")])
+ 
+-
+ (define_insn "one_cmpldi2"
+   [(set (match_operand:DI 0 "register_operand"		"=r")
+ 	(not:DI (match_operand:DI 1 "register_operand"	"r")))]
+@@ -975,6 +1116,55 @@ (define_insn "cbranch_qbbx_<BIT_TEST:code><EQS0:mode><EQS1:mode><EQD:mode>4"
+ 	       (le (minus (match_dup 2) (pc)) (const_int 2044)))
+ 	  (const_int 4)
+ 	  (const_int 8)))])
++
++;; Bit test conditional branch, but only for constant bit positions.
++;; This restriction allows an efficient code for DImode operands.
++;;
++;; QImode is already handled by the pattern variant above.
++(define_insn "@cbranch_qbbx_const_<BIT_TEST:code><HIDI:mode>"
++ [(set (pc)
++   (if_then_else
++    (BIT_TEST (zero_extract:HIDI
++	 (match_operand:HIDI 0 "register_operand" "r")
++	 (const_int 1)
++	 (match_operand:VOID 1 "const_int_operand" "i"))
++     (const_int 0))
++    (label_ref (match_operand 2))
++    (pc)))]
++  ""
++{
++  const int length = (get_attr_length (insn));
++  const bool is_near = (length == 4);
++
++  if (<HIDI:MODE>mode == DImode && INTVAL (operands[1]) <= 31)
++    {
++      if (is_near)
++	return "<BIT_TEST:qbbx_op>\\t%l2, %F0, %1";
++      else
++	return "<BIT_TEST:qbbx_negop>\\t.+8, %F0, %1\;jmp\\t%%label(%l2)";
++    }
++  else if (<HIDI:MODE>mode == DImode)
++    {
++      if (is_near)
++	return "<BIT_TEST:qbbx_op>\\t%l2, %N0, %1 - 32";
++      else
++	return "<BIT_TEST:qbbx_negop>\\t.+8, %N0, %1 - 32\;jmp\\t%%label(%l2)";
++    }
++  else
++    {
++      if (is_near)
++	return "<BIT_TEST:qbbx_op>\\t%l2, %0, %1";
++      else
++	return "<BIT_TEST:qbbx_negop>\\t.+8, %0, %1\;jmp\\t%%label(%l2)";
++    }
++}
++  [(set_attr "type" "control")
++   (set (attr "length")
++      (if_then_else
++	  (and (ge (minus (match_dup 2) (pc)) (const_int -2048))
++	       (le (minus (match_dup 2) (pc)) (const_int 2044)))
++	  (const_int 4)
++	  (const_int 8)))])
+ 
+ ;; ::::::::::::::::::::
+ ;; ::
+diff --git a/gcc/testsuite/gcc.target/pru/pr106564-1.c b/gcc/testsuite/gcc.target/pru/pr106564-1.c
+new file mode 100644
+index 00000000000..26fe2f32478
+--- /dev/null
++++ b/gcc/testsuite/gcc.target/pru/pr106564-1.c
+@@ -0,0 +1,9 @@
++/* { dg-do assemble } */
++/* { dg-options "-Os" } */
++/* { dg-final { object-size text <= 8 } } */
++
++
++unsigned long long test(unsigned char a)
++{
++        return a;
++}
+diff --git a/gcc/testsuite/gcc.target/pru/pr106564-2.c b/gcc/testsuite/gcc.target/pru/pr106564-2.c
+new file mode 100644
+index 00000000000..297c2ac1ac3
+--- /dev/null
++++ b/gcc/testsuite/gcc.target/pru/pr106564-2.c
+@@ -0,0 +1,9 @@
++/* { dg-do assemble } */
++/* { dg-options "-Os" } */
++/* { dg-final { object-size text <= 8 } } */
++
++
++unsigned long long test(unsigned int a)
++{
++        return a;
++}
+diff --git a/gcc/testsuite/gcc.target/pru/pr106564-3.c b/gcc/testsuite/gcc.target/pru/pr106564-3.c
+new file mode 100644
+index 00000000000..9d71114444e
+--- /dev/null
++++ b/gcc/testsuite/gcc.target/pru/pr106564-3.c
+@@ -0,0 +1,9 @@
++/* { dg-do assemble } */
++/* { dg-options "-Os" } */
++/* { dg-final { object-size text <= 16 } } */
++
++
++long long test(signed char a)
++{
++        return a;
++}
+diff --git a/gcc/testsuite/gcc.target/pru/pr106564-4.c b/gcc/testsuite/gcc.target/pru/pr106564-4.c
+new file mode 100644
+index 00000000000..6c1e4fbf964
+--- /dev/null
++++ b/gcc/testsuite/gcc.target/pru/pr106564-4.c
+@@ -0,0 +1,9 @@
++/* { dg-do assemble } */
++/* { dg-options "-Os" } */
++/* { dg-final { object-size text <= 16 } } */
++
++
++long long test(int a)
++{
++        return a;
++}
+-- 
+2.39.1
+

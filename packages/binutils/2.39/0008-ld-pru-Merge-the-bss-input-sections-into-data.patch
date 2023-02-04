@@ -1,0 +1,109 @@
+From a9c9f0650cee46a036e1932e39f42956aa4c9994 Mon Sep 17 00:00:00 2001
+From: Dimitar Dimitrov <dimitar@dinux.eu>
+Date: Thu, 26 Jan 2023 21:52:45 +0200
+Subject: [PATCH 1/2] ld: pru: Merge the bss input sections into data
+
+The popular method to load PRU firmware is through the remoteproc Linux
+kernel driver.  In order to save a few bytes from the firmware, the PRU
+CRT0 is spared from calling memset for the bss segment [1].  Instead the
+host loader is supposed to zero out the bss segment.  This is important
+for PRU, which typically has only 8KB for instruction memory.
+
+The legacy non-mainline PRU host driver relied on the default
+behaviour of the kernel core remoteproc [2].  That default is to zero
+out the loadable memory regions not backed by file storage (i.e. the
+bss sections).  This worked for the libgloss' CRT0.
+
+But the PRU loader merged in mainline Linux explicitly changes the
+default behaviour [3].  It no longer is zeroing out memory regions.
+Hence the bss sections are not initialized - neither by CRT0, nor by the
+host loader.
+
+This patch fixes the issue by aligning the GNU LD default linker script
+with the mainline Linux kernel expectation.  Since the mainline kernel
+driver is submitted by the PRU manufacturer itself (Text Instruments),
+we can consider that as defining the ABI.
+
+This change has been tested on Beaglebone AI-64 [4].  Static counter
+variables in the firmware are now always starting from zero, as
+expected.  There was only one new toolchain test failure in orphan3.d,
+due to reordering of the output sections.  I believe this is a harmless
+issue.  I could not rewrite the PASS criteria to ignore the output
+section ordering, so I have disabled that test case for PRU.
+
+[1] https://sourceware.org/git/?p=newlib-cygwin.git;a=blob;f=libgloss/pru/crt0.S;h=b3f0d53a93acc372f461007553e7688ca77753c9;hb=HEAD#l40
+[2] https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/drivers/remoteproc/remoteproc_elf_loader.c?h=v6.1#n228
+[3] https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/drivers/remoteproc/pru_rproc.c?h=v6.1#n641
+[4] https://beagleboard.org/ai-64
+
+ld/ChangeLog:
+
+	* scripttempl/pru.sc (.data): Merge .bss input sections into the
+	.data output section.
+	* testsuite/ld-elf/orphan3.d: Disable for PRU.
+
+Signed-off-by: Dimitar Dimitrov <dimitar@dinux.eu>
+---
+ ld/scripttempl/pru.sc         | 24 ++++++++++++++----------
+ ld/testsuite/ld-elf/orphan3.d |  2 +-
+ 2 files changed, 15 insertions(+), 11 deletions(-)
+
+diff --git a/ld/scripttempl/pru.sc b/ld/scripttempl/pru.sc
+index 56d07bea15d..7cb80694641 100644
+--- a/ld/scripttempl/pru.sc
++++ b/ld/scripttempl/pru.sc
+@@ -149,17 +149,13 @@ SECTIONS
+     ${RELOCATING+*(.gnu.linkonce.r*)}
+     ${RELOCATING+. = ALIGN(4);}
+     ${RELOCATING+ PROVIDE (_data_end = .) ; }
+-  } ${RELOCATING+ > dmem }
+ 
+-  /* Linux remoteproc loader requires the resource_table section
+-     start address to be aligned to 8 bytes.  */
+-  .resource_table ${RELOCATING-0} ${RELOCATING+ ALIGN(8)} :
+-  {
+-    KEEP (*(.resource_table))
+-  } ${RELOCATING+ > dmem}
+-
+-  .bss ${RELOCATING-0} :
+-  {
++    ${RELOCATING+/* Merge the bss input sections into the output
++      data section.  The Linux kernel's remoteproc PRU ELF loader
++      will not memzero the bss section.  The CRT0 will not either, in order
++      to reduce the final firmware's instruction memory size.  Hence
++      present bss sections as regular data sections, at the negligible
++      expense of increasing the ELF file size.  */}
+     ${RELOCATING+ PROVIDE (_bss_start = .) ; }
+     *(.bss)
+     ${RELOCATING+ *(.bss.*)}
+@@ -167,6 +163,14 @@ SECTIONS
+     ${RELOCATING+*(.gnu.linkonce.b*)}
+     ${RELOCATING+*(COMMON)}
+     ${RELOCATING+ PROVIDE (_bss_end = .) ; }
++
++  } ${RELOCATING+ > dmem}
++
++  /* Linux remoteproc loader requires the resource_table section
++     start address to be aligned to 8 bytes.  */
++  .resource_table ${RELOCATING-0} ${RELOCATING+ ALIGN (8)} :
++  {
++    KEEP (*(.resource_table))
+   } ${RELOCATING+ > dmem}
+ 
+   /* Global data not cleared after reset.  */
+diff --git a/ld/testsuite/ld-elf/orphan3.d b/ld/testsuite/ld-elf/orphan3.d
+index af6ce25e0fb..ec101643dea 100644
+--- a/ld/testsuite/ld-elf/orphan3.d
++++ b/ld/testsuite/ld-elf/orphan3.d
+@@ -7,7 +7,7 @@
+ #ld:
+ #readelf: -S --wide
+ #xfail: [uses_genelf]
+-#xfail: xstormy16-*-*
++#xfail: xstormy16-*-* pru-*-*
+ 
+ #...
+   \[[ 0-9]+\] \.foo +PROGBITS +[0-9a-f]+ +[0-9a-f]+ +0+20 +0+ +A +0 +0 +[0-9]+
+-- 
+2.39.1
+

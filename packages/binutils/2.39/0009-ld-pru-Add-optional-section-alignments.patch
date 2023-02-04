@@ -1,0 +1,75 @@
+From ba268471bf9a2b76efc0d7a9c05291f7e8cd4424 Mon Sep 17 00:00:00 2001
+From: Dimitar Dimitrov <dimitar@dinux.eu>
+Date: Sun, 29 Jan 2023 11:52:52 +0200
+Subject: [PATCH 2/2] ld: pru: Add optional section alignments
+
+The Texas Instruments SoCs with AARCH64 host processors have stricter
+alignment requirements than ones with ARM32 host processors.  It's not
+only the requirement for resource_table to be aligned to 8.  But also
+any loadable segment size must be a multiple of 4 [1].
+
+The current PRU default linker script may output a segment size not
+aligned to 4, which would cause firmware load failure on AARCH64 hosts.
+
+Fix this by using COMMONPAGESIZE and MAXPAGESIZE to signify respectively
+the section memory size requirement and the resource table section's
+start address alignment.  This would avoid penalizing the ARM32 hosts,
+for which the default values (1 and 1) are sufficient.
+
+For AARCH64 hosts, the alignments would be overwritten from GCC spec
+files using the linker command line, e.g.:
+  -z common-page-size=4 -z max-page-size=8
+
+[1] https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/drivers/remoteproc/pru_rproc.c?h=v6.1#n555
+
+ld/ChangeLog:
+
+	* scripttempl/pru.sc (_data_end): Remove the alignment.
+	(.data): Align output section size to COMMONPAGESIZE.
+	(.resource_table): Ditto.
+
+Signed-off-by: Dimitar Dimitrov <dimitar@dinux.eu>
+---
+ ld/scripttempl/pru.sc | 14 +++++++++++---
+ 1 file changed, 11 insertions(+), 3 deletions(-)
+
+diff --git a/ld/scripttempl/pru.sc b/ld/scripttempl/pru.sc
+index 7cb80694641..4229bed99bb 100644
+--- a/ld/scripttempl/pru.sc
++++ b/ld/scripttempl/pru.sc
+@@ -147,7 +147,6 @@ SECTIONS
+     ${RELOCATING+ *(.rodata:*)}
+     ${RELOCATING+*(.gnu.linkonce.d*)}
+     ${RELOCATING+*(.gnu.linkonce.r*)}
+-    ${RELOCATING+. = ALIGN(4);}
+     ${RELOCATING+ PROVIDE (_data_end = .) ; }
+ 
+     ${RELOCATING+/* Merge the bss input sections into the output
+@@ -164,13 +163,22 @@ SECTIONS
+     ${RELOCATING+*(COMMON)}
+     ${RELOCATING+ PROVIDE (_bss_end = .) ; }
+ 
++    ${RELOCATING+/* In case this is the last input section, align to
++      keep the loadable segment size a multiple of the common page size.
++      Some SoCs have stricter memory size requirements than others.  */
++    . = ALIGN (CONSTANT (COMMONPAGESIZE));}
+   } ${RELOCATING+ > dmem}
+ 
+   /* Linux remoteproc loader requires the resource_table section
+-     start address to be aligned to 8 bytes.  */
+-  .resource_table ${RELOCATING-0} ${RELOCATING+ ALIGN (8)} :
++     start address to be aligned to 8 bytes for SoCs with AARCH64
++     host processors.  */
++  .resource_table ${RELOCATING-0} ${RELOCATING+ ALIGN (CONSTANT (MAXPAGESIZE))} :
+   {
+     KEEP (*(.resource_table))
++    ${RELOCATING+/* In case this is the last input section, align to
++      keep the loadable segment size a multiple of the common page size.
++      Some SoCs have stricter memory size requirements than others.  */
++    . = ALIGN (CONSTANT (COMMONPAGESIZE));}
+   } ${RELOCATING+ > dmem}
+ 
+   /* Global data not cleared after reset.  */
+-- 
+2.39.1
+

@@ -1,0 +1,122 @@
+From 151effa22106a81f5835bb2dab7b95130f8fe2ef Mon Sep 17 00:00:00 2001
+From: Dimitar Dimitrov <dimitar@dinux.eu>
+Date: Mon, 22 Aug 2022 21:49:21 +0300
+Subject: [PATCH] pru: Add mov variants to load const -1
+
+Use the FILL instruction to efficiently load -1 constants.
+
+gcc/ChangeLog:
+
+	* config/pru/pru.md (prumov<mode>, mov<mode>): Add
+	variants for loading -1 consts.
+
+gcc/testsuite/ChangeLog:
+
+	* gcc.target/pru/mov-m1.c: New test.
+
+Signed-off-by: Dimitar Dimitrov <dimitar@dinux.eu>
+---
+ gcc/config/pru/pru.md                 | 25 ++++++++++++++-----------
+ gcc/testsuite/gcc.target/pru/mov-m1.c | 18 ++++++++++++++++++
+ 2 files changed, 32 insertions(+), 11 deletions(-)
+ create mode 100644 gcc/testsuite/gcc.target/pru/mov-m1.c
+
+diff --git a/gcc/config/pru/pru.md b/gcc/config/pru/pru.md
+index 031109236d6..02e11350a4d 100644
+--- a/gcc/config/pru/pru.md
++++ b/gcc/config/pru/pru.md
+@@ -206,8 +206,8 @@ (define_expand "mov<mode>"
+ ;;
+ ;; Note: Assume that Program Mem (T constraint) can fit in 16 bits!
+ (define_insn "prumov<mode>"
+-  [(set (match_operand:MOV32 0 "nonimmediate_operand" "=m,r,r,r,r,r")
+-	(match_operand:MOV32 1 "general_operand"      "r,m,r,T,J,iF"))]
++  [(set (match_operand:MOV32 0 "nonimmediate_operand" "=m,r,r,r,r,r,r")
++	(match_operand:MOV32 1 "general_operand"      "r,m,r,T,J,Um,iF"))]
+   ""
+   "@
+     sb%B0o\\t%b1, %0, %S0
+@@ -215,9 +215,10 @@ (define_insn "prumov<mode>"
+     mov\\t%0, %1
+     ldi\\t%0, %%pmem(%1)
+     ldi\\t%0, %1
++    fill\\t%0, 4
+     ldi32\\t%0, %1"
+-  [(set_attr "type" "st,ld,alu,alu,alu,alu")
+-   (set_attr "length" "4,4,4,4,4,8")])
++  [(set_attr "type" "st,ld,alu,alu,alu,alu,alu")
++   (set_attr "length" "4,4,4,4,4,4,8")])
+ 
+ 
+ ;; Separate pattern for 8 and 16 bit moves, since LDI32 pseudo instruction
+@@ -247,8 +248,8 @@ (define_insn "prumov<mode>"
+ ; Forcing DI reg alignment (akin to microblaze's HARD_REGNO_MODE_OK)
+ ; does not seem efficient, and will violate TI ABI.
+ (define_insn "mov<mode>"
+-  [(set (match_operand:MOV64 0 "nonimmediate_operand" "=m,r,r,r,r,r")
+-	(match_operand:MOV64 1 "general_operand"      "r,m,r,T,J,nF"))]
++  [(set (match_operand:MOV64 0 "nonimmediate_operand" "=m,r,r,r,r,r,r")
++	(match_operand:MOV64 1 "general_operand"      "r,m,Um,r,T,J,nF"))]
+   ""
+ {
+   switch (which_alternative)
+@@ -258,6 +259,8 @@ (define_insn "mov<mode>"
+     case 1:
+       return "lb%B1o\\t%b0, %1, %S1";
+     case 2:
++      return "fill\\t%F0, 8";
++    case 3:
+       /* careful with overlapping source and destination regs.  */
+       gcc_assert (GP_REG_P (REGNO (operands[0])));
+       gcc_assert (GP_REG_P (REGNO (operands[1])));
+@@ -265,18 +268,18 @@ (define_insn "mov<mode>"
+ 	return "mov\\t%N0, %N1\;mov\\t%F0, %F1";
+       else
+ 	return "mov\\t%F0, %F1\;mov\\t%N0, %N1";
+-    case 3:
+-      return "ldi\\t%F0, %%pmem(%1)\;ldi\\t%N0, 0";
+     case 4:
+-      return "ldi\\t%F0, %1\;ldi\\t%N0, 0";
++      return "ldi\\t%F0, %%pmem(%1)\;ldi\\t%N0, 0";
+     case 5:
++      return "ldi\\t%F0, %1\;ldi\\t%N0, 0";
++    case 6:
+       return "ldi32\\t%F0, %w1\;ldi32\\t%N0, %W1";
+     default:
+       gcc_unreachable ();
+   }
+ }
+-  [(set_attr "type" "st,ld,alu,alu,alu,alu")
+-   (set_attr "length" "4,4,8,8,8,16")])
++  [(set_attr "type" "st,ld,alu,alu,alu,alu,alu")
++   (set_attr "length" "4,4,4,8,8,8,16")])
+ 
+ ;
+ ; load_multiple pattern(s).
+diff --git a/gcc/testsuite/gcc.target/pru/mov-m1.c b/gcc/testsuite/gcc.target/pru/mov-m1.c
+new file mode 100644
+index 00000000000..0b31020e101
+--- /dev/null
++++ b/gcc/testsuite/gcc.target/pru/mov-m1.c
+@@ -0,0 +1,18 @@
++/* Loading a register with constant -1 integer value.  */
++
++/* { dg-do compile } */
++/* { dg-options "-O1" } */
++
++int
++test_set_m1_si (void)
++{
++  /* { dg-final { scan-assembler "fill\\tr14(.b0)?, 4" } } */
++  return -1;
++}
++
++long long
++test_set_m1_di (void)
++{
++  /* { dg-final { scan-assembler "fill\\tr14(.b0)?, 8" } } */
++  return -1;
++}
+-- 
+2.39.1
+
